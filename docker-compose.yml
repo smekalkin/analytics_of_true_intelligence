@@ -1,0 +1,94 @@
+name: ti-analytics
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: analytics
+      POSTGRES_DB: analytics
+      TZ: UTC
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/01-init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics -d analytics"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Имитация внешнего API геосервиса (вариант Б). Тот же образ, другой процесс.
+  geo-mock:
+    build:
+      context: ./backend
+      target: prod
+    command: ["node", "dist/mock-geo/main.js"]
+    environment:
+      MOCK_GEO_PORT: 4010
+      MOCK_GEO_API_KEY: ${GEO_API_KEY:-mock-geo-key}
+      MOCK_GEO_FAILURE_RATE: ${MOCK_GEO_FAILURE_RATE:-0.2}
+      MOCK_GEO_MAX_LATENCY_MS: 600
+      TZ: UTC
+    ports:
+      - "4010:4010"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4010/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      target: prod
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgres://analytics:analytics@db:5432/analytics
+      # Пусто → backend сгенерирует случайный ключ при старте. Для продакшена задайте свой: openssl rand -base64 48
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_EXPIRES_IN: 8h
+      CORS_ORIGIN: http://localhost:3000,http://127.0.0.1:3000
+      GEO_API_URL: http://geo-mock:4010
+      GEO_API_KEY: ${GEO_API_KEY:-mock-geo-key}
+      TZ: UTC
+    depends_on:
+      db:
+        condition: service_healthy
+      geo-mock:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3001/api
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+  # Автотесты (unit + e2e на реальном PostgreSQL): docker compose --profile test run --rm tests
+  tests:
+    profiles: ["test"]
+    build:
+      context: ./backend
+      target: test
+    environment:
+      DATABASE_URL_TEST: postgres://analytics:analytics@db:5432/analytics_test
+      TZ: UTC
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
