@@ -10,3 +10,4 @@ coverage/
 .history/
 *.tsbuildinfo
 next-env.d.ts
+tz.txt
